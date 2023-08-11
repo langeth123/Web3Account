@@ -1,10 +1,15 @@
-from web3 import Web3
+from web3 import Web3, AsyncHTTPProvider
 from loguru import logger as logs
 from os import path, mkdir, getcwd
 from eth_account import Account as acc
 import time
 from random import choice, uniform, randint
 from web3.exceptions import TransactionNotFound
+from web3.eth import AsyncEth
+import requests
+
+BASE_INCH_URL = "https://api-defillama.1inch.io"
+BASE_INCH_VER = 5
 
 BASE_ERC20_ABI = [
     {
@@ -75,6 +80,34 @@ BASE_ERC20_ABI = [
     }
 ]
 
+DEFAULT_NODES = {
+    "ethereum"      : ["https://rpc.ankr.com/eth"],
+    "bsc"           : ["https://rpc.ankr.com/bsc"],
+    "fantom"        : ["https://rpc.ankr.com/fantom"],
+    "polygon"       : ["https://rpc.ankr.com/polygon"],
+    "arbitrum"      : ["https://rpc.ankr.com/arbitrum"],
+    "avalanche"     : ["https://rpc.ankr.com/avalanche"],
+    "optimism"      : ["https://rpc.ankr.com/optimism"],
+    "celo"          : ["https://rpc.ankr.com/celo"],
+    "gnosis"        : ["https://rpc.ankr.com/gnosis"],
+    "polygon_zkevm" : ["https://rpc.ankr.com/polygon_zkevm"],
+    "zksync"        : ["https://rpc.ankr.com/zksync_era"]
+}
+
+DEFAULT_GWEI = {
+    "ethereum"      : 30,
+    "bsc"           : 1.5,
+    "fantom"        : 700,
+    "polygon"       : 600,
+    "arbitrum"      : 0.16,
+    "avalanche"     : 35,
+    "optimism"      : 0.0015,
+    "celo"          : 50,
+    "gnosis"        : 50,
+    "polygon_zkevm" : 50,
+    "zksync"        : 0.25
+}
+
 def retry(
         infinity: bool = False, max_retries: int = 5,
         timing: float = 0.5, handle_error: bool = False,
@@ -101,7 +134,7 @@ class Logger():
     def __init__(self, address: str) -> None:
         self.address = address
         self.logs_path = getcwd() + "\\logs\\"
-        self.path    = self.logs_path + self.address.lower()
+        self.path    = self.logs_path + self.address.lower() + '.txt'
 
         if path.exists(self.logs_path) is not True:
             mkdir(self.logs_path)
@@ -140,8 +173,10 @@ class Logger():
 class Web3Account:
     def __init__(
             self, secret_key: str, net_name: str, 
-            nodes: dict, sleeping_timings: list = [30, 60],
-            max_gwei: float = 100
+            nodes: dict = DEFAULT_NODES, sleeping_timings: list = [30, 60],
+            max_gwei: float = None,
+            proxies: str = None,
+            after_tx_sleeping: bool = True
     ) -> None:
         """
         ::nodes must be like {
@@ -151,17 +186,25 @@ class Web3Account:
         """
         self.eth_account = acc.from_key(secret_key)
         self.net_name    = net_name
-        self.nodes       = nodes
+        self.nodes       = Nodes(nodes, proxies=proxies).nodes
         self.logger      = Logger(self.eth_account.address)
         self.timings     = sleeping_timings
-        self.max_gwei    = max_gwei
+        self.address     = self.eth_account.address
+
+        self.after_tx_sleeping = after_tx_sleeping
+
+        if max_gwei:
+            self.max_gwei    = max_gwei
+        else: self.max_gwei = DEFAULT_GWEI[self.net_name]
+
+        self.inch_helper = Inch(self)
     
     def sleeping(self, error_message: str = "") -> None:
-        time_sleep = randint(self.sleeping)
+        time_sleep = randint(self.timings[0], self.timings[1])
         self.logger.info(f'Sleeping {time_sleep} seconds.. {error_message}')
         time.sleep(time_sleep)
 
-    def get_provider(self, custom_net: str = False):
+    def get_provider(self, custom_net: str = False) -> Web3:
         if custom_net:
             provider = choice(self.nodes.get(custom_net))
 
@@ -207,7 +250,7 @@ class Web3Account:
     @retry(max_retries=1, handle_error=True)
     def send_transaction(
             self, tx: dict, max_ethereum_gwei: float = False,
-            gas_upper: float = 1.1
+            gas_upper: float = 1.25
     ) -> str:
         w3 = self.get_provider()
 
@@ -228,8 +271,11 @@ class Web3Account:
         self.logger.success(f"Approved: {tx_token}")
 
         if self.wait_until_tx_finished(tx_token):
-            self.sleeping("Take a sleep after submited tx")
+            if self.after_tx_sleeping:
+                self.sleeping("Take a sleep after submited tx")
             return True
+        
+        else: return False
         
     def get_gas_price(self):
         w3 = self.get_provider()
@@ -241,14 +287,14 @@ class Web3Account:
         
         return round(w3.eth.gas_price)
     
-    def get_tx_data(self, value: int = 0, increase_gas_price : float = 1.1) -> dict:
+    def get_tx_data(self, value: int = 0, increase_gas_price : float = 1.25) -> dict:
         w3 = self.get_provider()
         gas_price = round(self.get_gas_price() * increase_gas_price)
 
         data = {
             'chainId': w3.eth.chain_id, 
-            'nonce': w3.eth.get_transaction_count(self.address),  
-            'from': self.address, 
+            'nonce': w3.eth.get_transaction_count(self.eth_account.address),  
+            'from': self.eth_account.address, 
             "value": value
         }
         if self.net_name in ["avalanche", "polygon", "arbitrum", "zora", "ethereum"]:
@@ -260,7 +306,7 @@ class Web3Account:
         else:
             data["maxFeePerGas"] = gas_price
             if self.net_name == "polygon":
-                data["maxPriorityFeePerGas"] = Web3.to_wei(uniform(20, 33), "gwei")
+                data["maxPriorityFeePerGas"] = Web3.to_wei(uniform(35, 50), "gwei")
             elif self.net_name == "avalanche":
                 data["maxPriorityFeePerGas"] = gas_price
             elif self.net_name == "ethereum":
@@ -310,7 +356,44 @@ class Web3Account:
             if self.send_transaction(check_data):
                 return
             else: raise Exception(f"Cant approve token: {token_contract}")
+
+    def send_money(self, receipt_address: str, amount: float) -> bool:
+        value = Web3.to_wei(amount, "ether") 
+        tx = self.get_tx_data(value)
+        tx["to"] = Web3.to_checksum_address(receipt_address) 
+
+        return self.send_transaction(tx)
+    
+    def swap(self, *args, increase_gas_price: float = 1.25):
+        """
+        ::args token_in: str, token_out: str, amount: int
+        """
+        data = self.inch_helper.get_data(
+            *args
+        )
+        if data.get("statusCode") == 400:
+            error = data.get("description")
+            if "Not enough allowance" in error:
+                self.logger.info(f'We must approve token to spend on 1inch, approving...')
+
+                spender = Web3.to_checksum_address(error.split("Spender: ")[1])
+                self.approve_token(args[0], spender)
+
+                return self.swap(*args, increase_gas_price=increase_gas_price)
+            else:
+                raise Exception(
+                    f"1Inch server raise exception: {error}"
+                )
         
+        elif "tx" in data.keys():
+            value = data["tx"]["value"]
+
+            tx = self.get_tx_data(int(value), increase_gas_price=increase_gas_price)
+            tx["to"] = Web3.to_checksum_address(data["tx"]["to"])
+            tx["data"] = data["tx"]["data"]
+
+            return self.send_transaction(tx)
+            
 
 class TransactionErrors:
     def __init__(self, error: object, account: Web3Account, custom_message=None) -> None:
@@ -341,3 +424,92 @@ class TransactionErrors:
             message = f'[{self.custom_message}] {message}'
 
         self.account.logger.error(message)
+
+class Nodes:
+    def __init__(self, nodes_data: dict, proxies: str = None) -> None:
+        """
+        ::nodes_data must be:
+            {
+                "polygon" : ["http://Node1", "http://Node2"....],
+                "bsc"     : ["http://Node1", "http://Node2"....]
+            }
+        """
+        self.nodes_data           = nodes_data
+        self.proxies              = proxies
+        self.connected_rpcs       = {}
+        self.connected_async_rpcs = {}
+
+        self.connect_to_all_nodes()
+
+    def connect_to_all_nodes(self):
+        if self.proxies:
+            proxy = {
+                "http"  : f"http://{self.proxies}",
+                "https" : f"http://{self.proxies}"
+            }
+        else: proxy = None
+
+        for net_name in self.nodes_data:
+            temp, async_temp = [], []
+
+            for i in self.nodes_data[net_name]:
+                temp.append(Web3(Web3.HTTPProvider(i, request_kwargs=proxy)))
+
+                web3 = Web3(
+                    AsyncHTTPProvider(i, request_kwargs=proxy),
+                    modules={"eth": (AsyncEth,)},
+                    middlewares=[]
+                )
+                async_temp.append(web3)
+            
+            self.connected_rpcs.update({net_name: temp})
+            self.connected_async_rpcs.update({net_name: temp})
+
+        logs.success(f'Connected to all RPCs')
+
+    @property
+    def nodes(self):
+        return self.connected_rpcs
+    
+    @property
+    def async_nodes(self):
+        return self.connected_async_rpcs
+
+
+class Inch:
+    def __init__(
+            self, account: Web3Account, 
+            url: str = BASE_INCH_URL,
+            version: int = BASE_INCH_VER
+    ) -> None:
+        self.chain_id = account.get_provider().eth.chain_id
+        self.url      = f'{url}/v{version}.0/{self.chain_id}/swap'
+        self.account  = account
+
+    @retry(max_retries=5, timing=10, handle_error=True, custom_message="1inch handler")
+    def make_request(self, url: str, method: str = "get", **kwargs):
+        response = requests.request(
+            method=method,
+            url=url,
+            **kwargs
+        )
+
+        return response.json()
+    
+    def get_data(self, token_in: str, token_out: str, amount: int) -> str:
+        if token_in.upper() == "ETH":
+            token_in = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+        elif token_out.upper() == "ETH":
+            token_out = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+        kwargs = {
+            "params": {
+                "fromTokenAddress" : token_in,
+                "toTokenAddress"   : token_out,
+                "fromAddress"      : self.account.address,
+                "slippage"         : 1,
+                "amount"           : amount
+            },
+            "timeout": 10
+        }
+        return self.make_request(self.url, **kwargs)
