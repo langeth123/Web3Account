@@ -1,0 +1,4 @@
+eth_account==0.9.0
+loguru==0.7.0
+requests==2.31.0
+web3==6.6.1
