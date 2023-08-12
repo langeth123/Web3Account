@@ -90,3 +90,7 @@ account.logger.info(f'Swap response: {swap_response}')
 ## Contributing
 
 Bug reports and/or pull requests are welcome
+
+## License
+
+The module is available as open source under the terms of the [Apache License, Version 2.0](https://opensource.org/licenses/Apache-2.0)
